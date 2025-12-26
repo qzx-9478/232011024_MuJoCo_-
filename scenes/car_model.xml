@@ -1,0 +1,107 @@
+<?xml version="1.0" ?>
+<mujoco model="Simple Car Color">
+  <compiler autolimits="true"/>
+  
+  <option timestep="0.002" iterations="50" solver="Newton" tolerance="1e-10">
+    <flag gravity="enable"/>
+  </option>
+
+  <asset>
+    <!-- 新地面：蓝色系棋盘格 -->
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" 
+             rgb1=".2 .3 .8" rgb2=".4 .6 .9"/>
+    <material name="grid" texture="grid" texrepeat="2 2" texuniform="true" reflectance=".2"/>
+    
+    <!-- 新车身材质：亮红色 -->
+    <material name="car_body" rgba="1.0 0.1 0.1 1.0" specular="0.3" shininess="0.3"/>
+    
+    <!-- 新车轮材质：亮黄色 -->
+    <material name="car_wheel" rgba="1.0 0.9 0.1 1.0" specular="0.2" shininess="0.2"/>
+    
+    <!-- 新装饰材质：亮青色（带发光效果） -->
+    <material name="car_decor" rgba="0.1 0.9 0.9 1.0" specular="0.5" shininess="0.5"/>
+    
+    <!-- 发光材质用于前灯 -->
+    <material name="light_glow" rgba="1.0 1.0 0.8 1.0"/>
+    
+    <mesh name="chasis" scale=".01 .006 .0015"
+      vertex=" 9   2   0
+              -10  10  10
+               9  -2   0
+               10  3  -10
+               10 -3  -10
+              -8   10 -10
+              -10 -10  10
+              -8  -10 -10
+              -5   0   20"/>
+  </asset>
+
+  <default>
+    <joint damping=".05" armature="0.005"/>
+    <geom friction="1 0.5 0.5" condim="3"/>
+    <default class="wheel">
+      <geom type="cylinder" size=".03 .01" material="car_wheel" friction="1.5 0.5 0.5"/>
+    </default>
+    <default class="decor">
+      <site type="box" material="car_decor"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <!-- 新外观的地面 -->
+    <geom type="plane" size="3 3 .01" material="grid" friction="1 0.5 0.5" condim="3"/>
+    
+    <!-- 添加背景装饰（半透明效果） -->
+    <geom type="box" pos="2.5 2.5 0.1" size="0.2 0.2 0.05" rgba="0.8 0.3 0.3 0.5"/>
+    <geom type="sphere" pos="-2.5 -2.5 0.15" size="0.15" rgba="0.3 0.8 0.3 0.5"/>
+    <geom type="cylinder" pos="0 3 0.1" size="0.1 0.05" rgba="0.3 0.3 0.8 0.5"/>
+    
+    <body name="car" pos="0 0 .05">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="1" diaginertia="0.02 0.02 0.03"/>
+      <light name="top light" pos="0 0 2" mode="trackcom" diffuse=".8 .8 .8"/>
+      
+      <!-- 红色车身 -->
+      <geom name="chasis" type="mesh" mesh="chasis" material="car_body"/>
+      
+      <!-- 黄色前轮 -->
+      <geom name="front wheel" pos=".08 0 -.015" type="sphere" size=".015" material="car_wheel" condim="1" priority="1"/>
+      
+      <!-- 增强前灯 -->
+      <light name="front light" pos=".1 0 .02" dir="2 0 -1" diffuse="1 1 0.8"/>
+      <geom name="front_light_vis" pos=".1 0 .02" type="sphere" size=".008" material="light_glow"/>
+      
+      <!-- 黄色左后轮 -->
+      <body name="left wheel" pos="-.07 .06 0" zaxis="0 1 0">
+        <joint name="left"/>
+        <geom class="wheel"/>
+        <site class="decor" size=".006 .025 .012"/>
+        <site class="decor" size=".025 .006 .012"/>
+      </body>
+      
+      <!-- 黄色右后轮 -->
+      <body name="right wheel" pos="-.07 -.06 0" zaxis="0 1 0">
+        <joint name="right"/>
+        <geom class="wheel"/>
+        <site class="decor" size=".006 .025 .012"/>
+        <site class="decor" size=".025 .006 .012"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <fixed name="forward">
+      <joint joint="left" coef=".5"/>
+      <joint joint="right" coef=".5"/>
+    </fixed>
+    <fixed name="turn">
+      <joint joint="left" coef="-.5"/>
+      <joint joint="right" coef=".5"/>
+    </fixed>
+  </tendon>
+
+  <actuator>
+    <motor name="forward" tendon="forward" ctrlrange="-1 1" gear="12"/>
+    <motor name="turn" tendon="turn" ctrlrange="-1 1" gear="6"/>
+  </actuator>
+</mujoco>
