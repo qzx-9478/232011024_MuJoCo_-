@@ -36,16 +36,15 @@
 
 ### 2.1 系统架构
 
-```
-┌─────────────────────────────────────────────────────┐
-│                 MuJoCo MPC 框架                      │
-├─────────────────────────────────────────────────────┤
-│ 物理仿真层 │ 控制算法层 │ 渲染引擎层 │ 任务管理层  │
-├─────────────────────────────────────────────────────┤
-│            汽车仪表盘模块（本作业）                  │
-│  ├─ 数据提取模块 │ 数据处理模块 │ 2D渲染模块 ─┤    │
-└─────────────────────────────────────────────────────┘
-```
+MuJoCo MPC 框架
+├─ 物理仿真层
+├─ 控制算法层
+├─ 渲染引擎层
+├─ 任务管理层
+└─ 仪表盘模块
+    ├─ 数据提取模块
+    ├─ 数据处理模块
+    └─ 2D 渲染模块
 
 系统分为四个主要功能模块：
 
@@ -71,29 +70,20 @@
 
 ### 2.2 数据流程
 
-```
-车辆物理仿真 (mjData)
-        ↓
-数据提取 (DashboardDataExtractor)
-        ↓
-数据处理 (速度单位转换、模拟数据生成)
-        ↓
-仪表盘渲染 (2D OpenGL绘图)
-        ↓
-屏幕显示 (叠加在3D场景上)
-```
+车辆物理仿真 (mjData) --> 数据提取 (DashboardDataExtractor) --> 数据处理（单位转换、模拟生成）--> 仪表盘渲染 (2D OpenGL) --> 屏幕显示（叠加在 3D 场景上）
 
 #### 数据结构设计
 
 ```cpp
+// simple_car.h 中定义的仪表盘数据结构
 struct DashboardData {
-    double speed_kmh;      // 速度 (km/h)
-    double rpm;            // 转速 (RPM)
-    double fuel;           // 油量 (%)
-    double temperature;    // 温度 (°C)
+    double speed_kmh = 0.0;      // 速度 (km/h)
+    double rpm = 0.0;            // 转速 (RPM)
+    double fuel = 100.0;         // 油量 (%)
+    double temperature = 60.0;   // 温度 (°C)
     
     // 模拟数据成员
-    mutable double simulated_fuel;  // 模拟油量变化
+    mutable double simulated_fuel = 100.0;  // 模拟油量变化
 };
 ```
 
@@ -114,143 +104,457 @@ struct DashboardData {
 
 ### 3.1 场景创建
 
-通过 **MJCF（MuJoCo XML 格式）** 文件定义仿真场景：
-
-#### 文件结构
+#### 3.1.1 MJCF车辆模型设计 (`car_model.xml`)
+```xml
+<!-- 车辆主体定义 -->
+<body name="car" pos="0 0 .05">
+  <freejoint/>  <!-- 自由关节实现6自由度运动 -->
+  <geom name="chasis" type="mesh" mesh="chasis" material="car_body"/>
+  
+  <!-- 前灯和视觉增强 -->
+  <light name="front light" pos=".1 0 .02" dir="2 0 -1" diffuse="1 1 0.8"/>
+  <geom name="front_light_vis" pos=".1 0 .02" type="sphere" size=".008" material="light_glow"/>
+</body>
 ```
-car_model.xml    # 车辆 3D 模型定义
-task.xml         # 仿真任务配置
+
+#### 3.1.2 MPC任务配置 (`task.xml`)
+```xml
+<!-- MPC控制器参数配置 -->
+<custom>
+  <numeric name="agent_horizon" data="2.0"/>      <!-- 预测时域 -->
+  <numeric name="agent_timestep" data="0.02"/>    <!-- 时间步长 -->
+  <numeric name="sampling_exploration" data="0.5"/><!-- 探索系数 -->
+</custom>
 ```
-
-#### 技术实现细节
-
-1. **车辆模型设计** (`car_model.xml`)
-   - 使用彩色材质（红色车身、黄色车轮）增强视觉效果
-   - 添加前灯光源，提升夜间或暗光环境下的视觉表现
-   - 定义关节与传动系统，支持车辆的全向运动
-   - 优化几何体细节，提高渲染质量
-
-2. **任务配置** (`task.xml`)
-   - 设定 MPC 控制器的参数（如预测步长、权重矩阵等）
-   - 定义用于状态反馈的虚拟传感器
-   - 配置目标点（通过 mocap body 实现），车辆将自动导航至该位置
-
-#### 场景特色
-- 地面采用蓝色棋盘格纹理，增强空间感与运动反馈
-- 车辆模型使用自由关节（free-joint），支持六自由度运动
-- 添加装饰性几何体（如圆锥、立方体）作为路标，丰富场景内容
-- 优化光照设置，营造逼真的环境氛围
 
 ### 3.2 数据获取
 
-#### 关键代码实现
-
+#### 3.2.1 实时数据更新逻辑 (`simple_car.cc`)
 ```cpp
 void SimpleCar::UpdateDashboardData(const mjModel* model, const mjData* data) const {
-    // 获取车身速度（从速度矢量计算合成速度）
-    double vx = data->qvel[0];  // X 方向速度分量
-    double vy = data->qvel[1];  // Y 方向速度分量
+    // 获取车辆速度
+    double vx = data->qvel[0];
+    double vy = data->qvel[1];
     double speed = std::sqrt(vx * vx + vy * vy);
     
-    // 转换为 km/h（米/秒 → 公里/小时）
+    // 转换为km/h
     dashboard_.speed_kmh = speed * 3.6;
-    
-    // 模拟转速（与速度成正比例关系）
+
+    // 模拟转速计算
     dashboard_.rpm = dashboard_.speed_kmh * 40.0 + 800.0;
-    dashboard_.rpm = std::min(std::max(dashboard_.rpm, 800.0), 8000.0);
-    
-    // 模拟油量消耗（随时间递减）
+    if (dashboard_.rpm > 8000.0) dashboard_.rpm = 8000.0;
+    if (dashboard_.rpm < 800.0) dashboard_.rpm = 800.0;
+
+    // 模拟油量消耗
     dashboard_.simulated_fuel -= 0.001;
     if (dashboard_.simulated_fuel < 0.0) dashboard_.simulated_fuel = 100.0;
     dashboard_.fuel = dashboard_.simulated_fuel;
-    
-    // 模拟温度（随转速变化）
+
+    // 模拟温度变化
     dashboard_.temperature = 60.0 + (dashboard_.rpm / 8000.0) * 60.0;
-    dashboard_.temperature = std::min(dashboard_.temperature, 120.0);
+    if (dashboard_.temperature > 120.0) dashboard_.temperature = 120.0;
+
+    // 调试输出（每秒输出一次）
+    if (fmod(data->time, 1.0) < 0.01) {
+        printf("Dashboard - Speed: %.1f km/h, RPM: %.0f, Fuel: %.1f%%, Temp: %.1f°C\n",
+               dashboard_.speed_kmh, dashboard_.rpm, dashboard_.fuel, dashboard_.temperature);
+    }
 }
 ```
 
-#### 数据验证机制
-通过控制台输出实时验证数据正确性，便于调试和监控：
-
+#### 3.2.2 MPC控制逻辑集成
 ```cpp
-printf("Dashboard - Speed: %.1f km/h, RPM: %.0f, Fuel: %.1f%%, Temp: %.1f°C\n",
-       dashboard_.speed_kmh, dashboard_.rpm, dashboard_.fuel, dashboard_.temperature);
-```
-
-### 3.3 仪表盘渲染
-
-#### 3.3.1 速度表实现
-
-| 组件 | 实现细节 |
-|------|----------|
-| **表盘背景** | 绘制半透明的浅灰色圆形背景 |
-| **外圈边框** | 添加亮蓝色的外圈边框，提升视觉层次 |
-| **刻度系统** | 绘制 12 个刻度线及对应的数字标签（0-50 km/h） |
-| **指针设计** | 根据当前速度计算指针角度，绘制红色指针 |
-| **数值显示** | 在中心区域显示当前速度数值 |
-
-**代码实现片段**：
-```cpp
-void SimpleCar::DrawSpeedometer2D(mjvScene* scene, float x, float y, float size) const {
-    // 1. 绘制表盘背景（半透明效果）
-    Draw2DCircle(scene, x, y, size, 0.7f, 0.7f, 0.75f, 0.7f);
+void SimpleCar::TransitionLocked(mjModel* model, mjData* data) {
+    // 1. 目标点追踪逻辑
+    double car_pos[2] = {data->qpos[0], data->qpos[1]};
+    double goal_pos[2] = {data->mocap_pos[0], data->mocap_pos[1]};
     
-    // 2. 绘制刻度线（12 个等分刻度）
-    for (int i = 0; i < 12; i++) {
-       float angle = i * (2.0f * M_PI / 12.0f);
-       // 计算刻度线起点和终点坐标
-       // ... 具体绘制代码
+    // 2. 计算车辆到目标的距离
+    double car_to_goal[2];
+    mju_sub(car_to_goal, goal_pos, car_pos, 2);
+    
+    // 3. 如果接近目标，随机生成新目标
+    if (mju_norm(car_to_goal, 2) < 0.2) {
+        absl::BitGen gen_;
+        data->mocap_pos[0] = absl::Uniform<double>(gen_, -2.0, 2.0);
+        data->mocap_pos[1] = absl::Uniform<double>(gen_, -2.0, 2.0);
+        data->mocap_pos[2] = 0.01;  // 保持在地面高度
     }
     
-    // 3. 计算指针角度（基于当前速度）
-    float speed_ratio = dashboard_.speed_kmh / 50.0f;
-    float angle = speed_ratio * 2.0f * M_PI - M_PI / 2.0f;
-    
-    // 4. 绘制指针（红色，有厚度感）
-    float pointer_length = size * 0.8f;
-    float end_x = x + pointer_length * std::cos(angle);
-    float end_y = y + pointer_length * std::sin(angle);
-    Draw2DLine(scene, x, y, end_x, end_y, 0.025f, 1.0f, 0.0f, 0.0f, 1.0f);
+    // 4. 更新仪表盘数据（每帧调用）
+    UpdateDashboardData(model, data);
 }
 ```
 
-#### 3.3.2 转速表设计特点
-- **配色方案**：米色背景配橙色边框，与速度表形成区分
-- **警告区域**：在 6000-8000 RPM 区域使用红色填充，表示高转速警告区
-- **指针设计**：绿色指针，与红色速度表指针形成视觉对比
-- **警告提示**：当转速超过 6000 RPM 时，表盘上方显示"HIGH RPM!"警告文字
+### 3.3 2D绘图函数库
 
-#### 3.3.3 油量表和温度表创新设计
+#### 3.3.1 基础绘图函数实现
+```cpp
+// 绘制2D矩形
+void SimpleCar::Draw2DRectangle(mjvScene* scene, float x, float y,
+                               float width, float height,
+                               float r, float g, float b, float a) const {
+    if (scene->ngeom >= scene->maxgeom) return;
+    
+    mjvGeom* geom = scene->geoms + scene->ngeom;
+    geom->type = mjGEOM_BOX;
+    geom->size[0] = width;
+    geom->size[1] = height;
+    geom->size[2] = 0.001f;  // 非常薄的2D矩形
+    geom->pos[0] = x;
+    geom->pos[1] = y;
+    geom->pos[2] = 0.0f;
+    geom->rgba[0] = r;
+    geom->rgba[1] = g;
+    geom->rgba[2] = b;
+    geom->rgba[3] = a;  // 透明度控制
+    geom->category = mjCAT_DECOR;
+    scene->ngeom++;
+}
 
-**动画效果实现**：
-| 仪表类型 | 动画效果 | 触发条件 |
-|----------|----------|----------|
-| **油量表** | 表盘背景以 1Hz 频率闪烁红色 | 油量低于 20% |
-| **温度表** | 温度条呈现脉冲式亮度变化 | 温度高于 100°C |
+// 绘制2D直线（使用矩形模拟）
+void SimpleCar::Draw2DLine(mjvScene* scene, float x1, float y1,
+                          float x2, float y2, float width,
+                          float r, float g, float b, float a) const {
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float length = std::sqrt(dx*dx + dy*dy);
+    float angle = std::atan2(dy, dx);
+    
+    mjvGeom* geom = scene->geoms + scene->ngeom;
+    geom->type = mjGEOM_BOX;
+    geom->size[0] = length / 2.0f;
+    geom->size[1] = width / 2.0f;
+    geom->size[2] = 0.001f;
+    geom->pos[0] = (x1 + x2) / 2.0f;
+    geom->pos[1] = (y1 + y2) / 2.0f;
+    geom->pos[2] = 0.0f;
+    geom->rgba[0] = r;
+    geom->rgba[1] = g;
+    geom->rgba[2] = b;
+    geom->rgba[3] = a;
+    
+    // 旋转矩阵
+    float cos_a = std::cos(angle);
+    float sin_a = std::sin(angle);
+    float mat[9] = {
+        cos_a, -sin_a, 0.0f,
+        sin_a, cos_a,  0.0f,
+        0.0f,  0.0f,   1.0f
+    };
+    for (int i = 0; i < 9; i++) geom->mat[i] = mat[i];
+    
+    geom->category = mjCAT_DECOR;
+    scene->ngeom++;
+}
+```
 
-**视觉反馈增强**：
-1. **渐变填充**：使用渐变填充的进度条表示当前值
-2. **辅助刻度**：添加精细刻度线，提高读数精度
-3. **指示器设计**：在当前值位置绘制三角形指示器
-4. **颜色编码**：根据数值范围自动调整显示颜色
+### 3.4 仪表盘渲染实现
 
-### 3.4 2D绘图函数库
+#### 3.4.1 速度表完整实现
+```cpp
+void SimpleCar::DrawSpeedometer2D(mjvScene* scene, float x, float y, float size) const {
+    // 1. 表盘背景（带透明度）
+    Draw2DCircle(scene, x, y, size, 0.7f, 0.7f, 0.75f, 0.7f);
+    
+    // 2. 外圈装饰边框
+    Draw2DCircle(scene, x, y, size * 1.05f, 0.4f, 0.7f, 1.0f, 0.6f);
+    Draw2DCircle(scene, x, y, size * 0.95f, 0.3f, 0.3f, 0.4f, 0.8f);
+    
+    // 3. 刻度系统（12个主刻度）
+    for (int i = 0; i < 12; i++) {
+        float angle = i * (2.0f * M_PI / 12.0f);
+        float cos_a = std::cos(angle);
+        float sin_a = std::sin(angle);
+        
+        float inner_radius = size * 0.8f;
+        float outer_radius = size * 0.9f;
+        
+        Draw2DLine(scene, 
+                  x + inner_radius * cos_a, y + inner_radius * sin_a,
+                  x + outer_radius * cos_a, y + outer_radius * sin_a,
+                  0.02f, 0.1f, 0.1f, 0.2f, 0.8f);
+    }
+    
+    // 4. 数字标签（0-50 km/h）
+    for (int i = 0; i < 6; i++) {
+        float angle = i * (2.0f * M_PI / 6.0f) - M_PI/2.0f;
+        float label_radius = size * 0.7f;
+        
+        char label[10];
+        std::snprintf(label, sizeof(label), "%d", i * 10);
+        
+        AddLabel(scene, 
+                 x + label_radius * std::cos(angle), 
+                 y + label_radius * std::sin(angle), 
+                 0.01f, label, 0.1f, 0.1f, 0.1f, 0.9f);
+    }
+    
+    // 5. 动态指针计算
+    float speed_ratio = dashboard_.speed_kmh / 50.0f;
+    if (speed_ratio > 1.0f) speed_ratio = 1.0f;
+    float angle = speed_ratio * 2.0f * M_PI - M_PI/2.0f;
+    
+    // 6. 绘制指针（红色）
+    float pointer_length = size * 0.6f;
+    float end_x = x + pointer_length * std::cos(angle);
+    float end_y = y + pointer_length * std::sin(angle);
+    
+    Draw2DLine(scene, x, y, end_x, end_y, 0.025f, 1.0f, 0.0f, 0.0f, 1.0f);
+    
+    // 7. 中心装饰点
+    Draw2DCircle(scene, x, y, size * 0.06f, 0.0f, 0.0f, 0.0f, 1.0f);
+    Draw2DCircle(scene, x, y, size * 0.04f, 1.0f, 1.0f, 1.0f, 1.0f);
+    
+    // 8. 数值显示和单位
+    char speed_text[50];
+    std::snprintf(speed_text, sizeof(speed_text), "%.1f", dashboard_.speed_kmh);
+    AddLabel(scene, x, y, 0.02f, speed_text, 0.15f, 0.15f, 0.1f, 0.9f);
+    AddLabel(scene, x, y - size * 0.25f, 0.02f, "km/h", 0.08f, 0.0f, 0.3f, 0.8f);
+    
+    // 9. 仪表标题
+    AddLabel(scene, x, y + size * 1.2f, 0.02f, "SPEED", 0.15f, 0.0f, 0.5f, 1.0f);
+}
+```
 
-为实现仪表盘渲染，开发了一组 **2D 绘图辅助函数**：
+#### 3.4.2 转速表实现（带警告区域）
+```cpp
+void SimpleCar::DrawTachometer2D(mjvScene* scene, float x, float y, float size) const {
+    // 表盘背景
+    Draw2DCircle(scene, x, y, size, 0.75f, 0.75f, 0.7f, 0.7f);
+    
+    // 外圈边框
+    Draw2DCircle(scene, x, y, size * 1.05f, 1.0f, 0.6f, 0.3f, 0.6f);
+    Draw2DCircle(scene, x, y, size * 0.95f, 0.4f, 0.3f, 0.2f, 0.8f);
+    
+    // 红色警告区域（6000-8000 RPM）
+    if (dashboard_.rpm > 6000.0) {
+        float warning_ratio = (dashboard_.rpm - 6000.0f) / 2000.0f;
+        if (warning_ratio > 1.0f) warning_ratio = 1.0f;
+        
+        // 多层叠加的红色闪烁效果
+        for (int i = 0; i < 3; i++) {
+            float alpha = 0.3f + 0.7f * (i / 3.0f);
+            Draw2DCircle(scene, x, y, size * (0.9f - i * 0.05f), 
+                         1.0f, 0.3f, 0.3f, alpha * warning_ratio);
+        }
+    }
+    
+    // 刻度线
+    for (int i = 0; i < 12; i++) {
+        float angle = i * (2.0f * M_PI / 12.0f);
+        float cos_a = std::cos(angle);
+        float sin_a = std::sin(angle);
+        
+        float inner_radius = size * 0.8f;
+        float outer_radius = size * 0.9f;
+        
+        Draw2DLine(scene, 
+                  x + inner_radius * cos_a, y + inner_radius * sin_a,
+                  x + outer_radius * cos_a, y + outer_radius * sin_a,
+                  0.02f, 0.1f, 0.1f, 0.2f, 0.8f);
+    }
+    
+    // 数字标签（0, 2, 4, 6, 8 x1000）
+    for (int i = 0; i < 5; i++) {
+        float angle = i * (2.0f * M_PI / 5.0f) - M_PI/2.0f;
+        float label_radius = size * 0.7f;
+        
+        char label[10];
+        std::snprintf(label, sizeof(label), "%d", i * 2);
+        
+        AddLabel(scene, 
+                 x + label_radius * std::cos(angle), 
+                 y + label_radius * std::sin(angle), 
+                 0.01f, label, 0.1f, 0.1f, 0.1f, 0.9f);
+    }
+    
+    // 动态指针计算（绿色）
+    float rpm_ratio = dashboard_.rpm / 8000.0f;
+    if (rpm_ratio > 1.0f) rpm_ratio = 1.0f;
+    float angle = rpm_ratio * 2.0f * M_PI - M_PI/2.0f;
+    float pointer_length = size * 0.6f;
+    float end_x = x + pointer_length * std::cos(angle);
+    float end_y = y + pointer_length * std::sin(angle);
+    
+    // 绘制指针（绿色）
+    Draw2DLine(scene, x, y, end_x, end_y, 0.025f, 0.0f, 1.0f, 0.0f, 1.0f);
+    
+    // 中心装饰点
+    Draw2DCircle(scene, x, y, size * 0.06f, 0.0f, 0.0f, 0.0f, 1.0f);
+    Draw2DCircle(scene, x, y, size * 0.04f, 1.0f, 1.0f, 1.0f, 1.0f);
+    
+    // 当前RPM值显示
+    char rpm_text[50];
+    std::snprintf(rpm_text, sizeof(rpm_text), "%.0f", dashboard_.rpm);
+    AddLabel(scene, x, y, 0.02f, rpm_text, 0.15f, 0.15f, 0.1f, 0.9f);
+    AddLabel(scene, x, y - size * 0.25f, 0.02f, "RPM", 0.08f, 0.0f, 0.3f, 0.8f);
+    
+    // 仪表标题
+    AddLabel(scene, x, y + size * 1.2f, 0.02f, "TACHOMETER", 0.15f, 1.0f, 0.5f, 0.0f);
+    
+    // 高转速警告
+    if (dashboard_.rpm > 6000.0) {
+        AddLabel(scene, x, y - size * 1.4f, 0.02f, "HIGH RPM!", 
+                 0.12f, 1.0f, 0.1f, 0.1f);
+    }
+}
+```
 
-| 函数名称 | 功能描述 | 参数说明 |
-|----------|----------|----------|
-| `Draw2DRectangle()` | 绘制矩形（支持填充与边框） | 位置、大小、颜色、透明度 |
-| `Draw2DLine()` | 绘制直线（可指定线宽与端点样式） | 起点、终点、线宽、颜色 |
-| `Draw2DCircle()` | 绘制圆形（支持渐变填充） | 圆心、半径、颜色、分段数 |
-| `AddLabel()` | 添加文字标签（支持字体与对齐） | 位置、文本、字体大小、颜色 |
+#### 3.4.3 油量表动态效果
+```cpp
+void SimpleCar::DrawFuelGauge2D(mjvScene* scene, float x, float y, float width, float height) const {
+    // 1. 计算油量条宽度
+    float fuel_width = (dashboard_.fuel / 100.0f) * width;
+    
+    // 2. 根据油量设置颜色
+    float fuel_color_r, fuel_color_g, fuel_color_b;
+    if (dashboard_.fuel > 50.0f) {
+        fuel_color_r = 0.2f; fuel_color_g = 1.0f; fuel_color_b = 0.2f;  // 绿色
+    } else if (dashboard_.fuel > 20.0f) {
+        fuel_color_r = 1.0f; fuel_color_g = 1.0f; fuel_color_b = 0.2f;  // 黄色
+    } else {
+        fuel_color_r = 1.0f; fuel_color_g = 0.2f; fuel_color_b = 0.2f;  // 红色
+    }
+    
+    // 3. 绘制动态油量条
+    if (fuel_width > 0.01f) {
+        float fuel_x = x - (width - fuel_width) / 2.0f;
+        Draw2DRectangle(scene, fuel_x, y, 
+                        fuel_width, height * 0.8f, 
+                        fuel_color_r, fuel_color_g, fuel_color_b, 1.0f);
+    }
+    
+    // 4. 低油量闪烁效果
+    if (dashboard_.fuel < 20.0f) {
+        static float blink_timer = 0.0f;
+        blink_timer += 0.1f;
+        if (fmod(blink_timer, 1.0f) > 0.5f) {
+            Draw2DRectangle(scene, x, y, width, height, 
+                           1.0f, 0.2f, 0.2f, 0.3f);  // 半透明红色闪烁
+        }
+    }
+    
+    // 5. 油量标签
+    char fuel_text[50];
+    std::snprintf(fuel_text, sizeof(fuel_text), "FUEL: %.1f%%", dashboard_.fuel);
+    AddLabel(scene, x, y + height * 0.8f, 0.02f, fuel_text, 0.1f, 0.1f, 0.1f, 1.0f);
+    
+    // 6. 低油量警告
+    if (dashboard_.fuel < 20.0) {
+        AddLabel(scene, x, y - height * 0.8f, 0.02f, "LOW FUEL!", 0.12f, 1.0f, 0.1f, 0.1f);
+    }
+}
+```
 
-**技术实现原理**：
-这些函数底层调用 MuJoCo 的几何体创建接口，并将 2D 坐标转换为 3D 场景中的屏幕空间坐标，从而实现：
-- 在 3D 视图上的 2D 覆盖绘制
-- 保持正确的深度测试和混合设置
-- 支持半透明和抗锯齿效果
+#### 3.4.4 温度表示例代码
+```cpp
+void SimpleCar::DrawTemperatureGauge2D(mjvScene* scene, float x, float y, float width, float height) const {
+    // 温度范围定义
+    float min_temp = 60.0f;
+    float max_temp = 120.0f;
+    float temp_range = max_temp - min_temp;
+    
+    // 计算温度比例
+    float temp_ratio = (dashboard_.temperature - min_temp) / temp_range;
+    if (temp_ratio < 0.0f) temp_ratio = 0.0f;
+    if (temp_ratio > 1.0f) temp_ratio = 1.0f;
+    
+    float temp_width = temp_ratio * width;
+    
+    // 动态颜色渐变
+    float temp_color_r, temp_color_g, temp_color_b;
+    if (temp_ratio < 0.5f) {
+        // 低温到中温：蓝到绿
+        float t = temp_ratio / 0.5f;
+        temp_color_r = 0.3f * (1.0f - t);
+        temp_color_g = 0.5f + 0.5f * t;
+        temp_color_b = 1.0f * (1.0f - t);
+    } else if (temp_ratio < 0.8f) {
+        // 中温到高温：绿到黄
+        float t = (temp_ratio - 0.5f) / 0.3f;
+        temp_color_r = 0.3f + 0.7f * t;
+        temp_color_g = 1.0f * (1.0f - 0.2f * t);
+        temp_color_b = 0.5f * (1.0f - t);
+    } else {
+        // 高温：黄到红
+        float t = (temp_ratio - 0.8f) / 0.2f;
+        temp_color_r = 1.0f;
+        temp_color_g = 0.8f * (1.0f - t);
+        temp_color_b = 0.2f * (1.0f - t);
+    }
+    
+    // 绘制温度条
+    if (temp_width > 0.01f) {
+        float temp_x = x - (width - temp_width) / 2.0f;
+        Draw2DRectangle(scene, temp_x, y, 
+                        temp_width, height * 0.8f, 
+                        temp_color_r, temp_color_g, temp_color_b, 1.0f);
+        
+        // 高温脉冲效果
+        if (dashboard_.temperature > 100.0f) {
+            static float heat_timer = 0.0f;
+            heat_timer += 0.05f;
+            float pulse = 0.3f + 0.3f * sin(heat_timer * 5.0f);
+            Draw2DRectangle(scene, x, y, width, height, 1.0f, 0.3f, 0.3f, pulse);
+        }
+    }
+    
+    // 温度标签
+    char temp_text[50];
+    std::snprintf(temp_text, sizeof(temp_text), "TEMP: %.1f°C", dashboard_.temperature);
+    AddLabel(scene, x, y + height * 0.8f, 0.02f, temp_text, 0.1f, 0.1f, 0.1f, 1.0f);
+    
+    // 高温警告
+    if (dashboard_.temperature > 100.0) {
+        AddLabel(scene, x, y - height * 0.8f, 0.02f, "OVERHEAT!", 0.12f, 1.0f, 0.1f, 0.1f);
+    }
+}
+```
+
+#### 3.4.5 场景集成调用
+```cpp
+void SimpleCar::ModifyScene(const mjModel* model, const mjData* data,
+                            mjvScene* scene) const {
+    // 1. 检查渲染场景可用性
+    if (!scene || scene->maxgeom == 0) return;
+    
+    // 2. 设置仪表盘位置（屏幕顶部中央）
+    float screen_center_x = 0.0f;
+    float screen_top = 3.0f;
+    
+    // 3. 绘制仪表盘标题
+    AddLabel(scene, screen_center_x, screen_top - 0.5f, 0.5f, 
+             "CAR DASHBOARD", 0.25f, 0.0f, 0.5f, 1.0f);
+    
+    // 4. 布局四个仪表组件
+    // 速度表（左上）
+    DrawSpeedometer2D(scene, screen_center_x - 2.5f, screen_top - 2.0f, 0.8f);
+    
+    // 转速表（右上）
+    DrawTachometer2D(scene, screen_center_x + 2.5f, screen_top - 2.0f, 0.8f);
+    
+    // 油量表（左下）
+    DrawFuelGauge2D(scene, screen_center_x - 2.5f, screen_top - 3.5f, 1.5f, 0.4f);
+    
+    // 温度表（右下）
+    DrawTemperatureGauge2D(scene, screen_center_x + 2.5f, screen_top - 3.5f, 1.5f, 0.4f);
+    
+    // 5. 原有3D目标标记（红色球）
+    if (scene->ngeom < scene->maxgeom) {
+        mjvGeom* geom = scene->geoms + scene->ngeom;
+        geom->type = mjGEOM_SPHERE;
+        geom->size[0] = geom->size[1] = geom->size[2] = 0.15;
+        geom->pos[0] = data->mocap_pos[0];
+        geom->pos[1] = data->mocap_pos[1];
+        geom->pos[2] = 0.2;
+        geom->rgba[0] = 1.0f; geom->rgba[1] = 0.0f; 
+        geom->rgba[2] = 0.0f; geom->rgba[3] = 0.8f;
+        geom->category = mjCAT_DECOR;
+        scene->ngeom++;
+    }
+}
+```
 
 ---
 
@@ -349,7 +653,7 @@ DrawSpeedometer2D(scene, screen_center_x - 2.5f, screen_top - 2.0f, 0.8f);
 | **图5** | 完整仪表盘界面 | 四个仪表组件完整显示，与 3D 场景融合良好 |
 
 #### 视频演示内容
-录制了 **1分30秒** 的演示视频，展示以下内容：
+录制了 **1分30秒** 的演示视频，视频链接为：https://b23.tv/y2iql0n，展示以下内容：
 1. **程序启动流程**：从命令行启动到任务选择
 2. **车辆自动导航**：展示 MPC 控制的路径跟踪能力
 3. **仪表盘实时更新**：各仪表组件随车辆状态动态变化
@@ -481,5 +785,3 @@ DrawSpeedometer2D(scene, screen_center_x - 2.5f, screen_top - 2.0f, 0.8f);
 | **图形工具** | GIMP | 2.10.30 | 纹理和图标设计 |
 
 ---
-
-
